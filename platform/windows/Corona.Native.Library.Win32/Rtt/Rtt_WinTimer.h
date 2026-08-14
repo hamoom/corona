@@ -1,9 +1,17 @@
 //////////////////////////////////////////////////////////////////////////////
 //
 // This file is part of the Corona game engine.
-// For overview and more information on licensing please refer to README.md 
+// For overview and more information on licensing please refer to README.md
 // Home page: https://github.com/coronalabs/corona
 // Contact: support@coronalabs.com
+//
+//////////////////////////////////////////////////////////////////////////////
+//
+// MODIFIED: High-resolution frame pacing experiment
+// Changes:
+//   - Added QPC-based timing fields for sub-millisecond frame scheduling
+//   - Added FrameDiagnostics for measuring actual frame intervals
+//   - Original GetTickCount()/SetTimer(10ms) path preserved as fallback
 //
 //////////////////////////////////////////////////////////////////////////////
 
@@ -13,10 +21,14 @@
 #include "Rtt_PlatformTimer.h"
 #include <Windows.h>
 #include <unordered_map>
+#include <cstdint>
 
 
 namespace Rtt
 {
+
+/// <summary>Collects high-resolution frame timing data for analysis.</summary>
+struct FrameDiagnostics;
 
 class WinTimer : public PlatformTimer
 {
@@ -69,8 +81,8 @@ class WinTimer : public PlatformTimer
 		///   large positive numbers.
 		///  </para>
 		/// </summary>
-		/// <param name="x">Ticks value to be compared against argument "y".</para>
-		/// <param name="y">Ticks value to be compared against argument "x".</para>
+		/// <param name="x">Ticks value to be compared against argument "y".</param>
+		/// <param name="y">Ticks value to be compared against argument "x".</param>
 		/// <returns>
 		///  <para>Returns a positive value if "x" is greater than "y".</para>
 		///  <para>Returns zero if "x" is equal to "y".</para>
@@ -78,11 +90,21 @@ class WinTimer : public PlatformTimer
 		/// </returns>
 		static S32 CompareTicks(S32 x, S32 y);
 
+		// --- Original fields (preserved for fallback path) ---
 		HWND fWindowHandle;
 		UINT_PTR fTimerPointer;
 		UINT_PTR fTimerID;
 		U32 fIntervalInMilliseconds;
 		S32 fNextIntervalTimeInTicks;
+
+		// --- High-resolution timing fields ---
+		LARGE_INTEGER fQpcFrequency;    // QPC ticks per second (typically 10 MHz on modern Windows)
+		double fIntervalQpc;            // Frame interval in QPC ticks (preserves 16.6667ms precision)
+		double fNextDeadlineQpc;        // Absolute deadline in QPC ticks (double avoids truncation drift)
+		bool fUseHiResTimer;            // true = QPC + timeBeginPeriod(1), false = stock GetTickCount path
+
+		// --- Frame diagnostics ---
+		FrameDiagnostics* fDiagnostics; // Heap-allocated to avoid bloating the class; may be null
 
 		static std::unordered_map<UINT_PTR, WinTimer*> sTimerMap; // timer callback might be called after Stop(), so use this as a guard
 		static UINT_PTR sMostRecentTimerID; // use an incrementing index as key, to be robust against the rare case that a new timer is reallocated into the same memory

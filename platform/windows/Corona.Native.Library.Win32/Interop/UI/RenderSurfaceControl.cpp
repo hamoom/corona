@@ -1,9 +1,14 @@
 //////////////////////////////////////////////////////////////////////////////
 //
 // This file is part of the Corona game engine.
-// For overview and more information on licensing please refer to README.md 
+// For overview and more information on licensing please refer to README.md
 // Home page: https://github.com/coronalabs/corona
 // Contact: support@coronalabs.com
+//
+//////////////////////////////////////////////////////////////////////////////
+//
+// MODIFIED: Added optional explicit vsync configuration via wglSwapIntervalEXT.
+// Controlled by environment variable SOLAR2D_VSYNC (see CreateContext method).
 //
 //////////////////////////////////////////////////////////////////////////////
 
@@ -17,6 +22,7 @@
 #include <GL\gl.h>
 #include <GL\glu.h>
 
+#include <cstdlib>
 #include "CoronaLog.h"
 #include "Renderer/Rtt_VulkanExports.h"
 
@@ -121,7 +127,7 @@ void RenderSurfaceControl::SwapBuffers()
 	{
 		return;
 	}
-	
+
 	if (fMainDeviceContextHandle)
 	{
 		::SwapBuffers(fMainDeviceContextHandle);
@@ -261,6 +267,42 @@ void RenderSurfaceControl::CreateContext(const Params & params)
 
 		// Load OpenGL extensions.
 		glewInit();
+
+		// --- EXPERIMENTAL: Optional explicit vsync configuration ---
+		//
+		// Stock Solar2D does NOT call wglSwapIntervalEXT(), leaving vsync behavior
+		// entirely to the GPU driver defaults and Windows DWM (Desktop Window Manager).
+		//
+		// On modern Windows (8+), DWM compositing means SwapBuffers() is implicitly
+		// synchronized to the display refresh regardless of the swap interval setting.
+		// However, explicitly setting the swap interval can still affect behavior:
+		//   - In fullscreen exclusive mode (if applicable), it controls actual vsync
+		//   - Some drivers respect it even under DWM composition
+		//   - wglSwapIntervalEXT(0) may reduce input latency at the cost of tearing
+		//
+		// Environment variable SOLAR2D_VSYNC controls the swap interval:
+		//   SOLAR2D_VSYNC=1  -> Enable vsync (sync to monitor refresh)
+		//   SOLAR2D_VSYNC=0  -> Disable vsync (may reduce latency, may cause tearing)
+		//   Not set           -> Leave at driver/DWM default (stock behavior)
+		//
+		{
+			char vsyncBuf[16] = {};
+			DWORD vsyncLen = ::GetEnvironmentVariableA("SOLAR2D_VSYNC", vsyncBuf, sizeof(vsyncBuf));
+			if (vsyncLen > 0)
+			{
+				int vsyncValue = atoi(vsyncBuf);
+				if (WGLEW_EXT_swap_control)
+				{
+					wglSwapIntervalEXT(vsyncValue);
+					Rtt_LogException("Solar2D: Set wglSwapIntervalEXT(%d) [vsync %s]\r\n",
+						vsyncValue, vsyncValue ? "ON" : "OFF");
+				}
+				else
+				{
+					Rtt_LogException("Solar2D: WGL_EXT_swap_control not available, cannot set vsync\r\n");
+				}
+			}
+		}
 
 		// Fetch the OpenGL driver's version.
 		const char* versionString = (const char*)glGetString(GL_VERSION);
@@ -476,7 +518,7 @@ void RenderSurfaceControl::OnReceivedMessage(UIComponent& sender, HandleMessageE
 		{
 			// As an optimization, always handle the "Erase Background" message so that the operating system
 			// won't automatically paint over the background. We'll just let OpenGL paint over the entire surface.
-			// Handle the 
+			// Handle the
 			arguments.SetHandled();
 			arguments.SetReturnResult(1);
 			break;
@@ -624,12 +666,12 @@ void RenderSurfaceControl::Params::SetVulkanWanted(bool required)
 	fWantVulkan = true;
 	fRequireVulkan = required;
 }
-			
+
 bool RenderSurfaceControl::Params::IsVulkanWanted() const
 {
 	return fWantVulkan;
 }
-			
+
 bool RenderSurfaceControl::Params::IsVulkanRequired() const
 {
 	return fRequireVulkan;

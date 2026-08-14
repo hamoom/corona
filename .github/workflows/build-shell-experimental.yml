@@ -1,0 +1,167 @@
+# =============================================================================
+# Solar2D Fork: Build Experimental Corona.Shell.exe
+# =============================================================================
+#
+# Place this file at .github/workflows/build-shell-experimental.yml in your
+# fork of https://github.com/coronalabs/corona
+#
+# Manually trigger to build Corona.Shell.exe with the modified timer/vsync code.
+# Uploads the shell exe + DLLs as a workflow artifact AND creates a GitHub release
+# tagged "experimental-latest" for easy consumption by the Mega Hasan workflow.
+#
+# This builds only Corona.Shell.sln (the runtime shell), NOT the full SDK/simulator.
+# =============================================================================
+
+name: Build Experimental Shell
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_label:
+        description: 'Build label for the artifact'
+        required: false
+        default: 'hires-timer'
+
+jobs:
+  build-shell:
+    name: Build Corona.Shell (Release|x86)
+    runs-on: windows-2022
+
+    steps:
+      # ── 1. Checkout with submodules ──────────────────────────────────
+      - name: Checkout corona
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── 2. Setup Visual Studio environment ──────────────────────────
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # ── 3. Ensure v142 toolset is available (VS2019 build tools) ────
+      #    Corona.Shell.sln uses PlatformToolset v142. The windows-2022
+      #    runner has VS2022 which includes v142 components by default,
+      #    but we'll install them explicitly just in case.
+      - name: Ensure VC v142 toolset
+        shell: powershell
+        run: |
+          # Check if v142 MSBuild platform is available
+          $v142Path = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v160"
+          if (-not (Test-Path $v142Path)) {
+            Write-Host "Installing v142 toolset component..."
+            Set-Location "C:\Program Files (x86)\Microsoft Visual Studio\Installer\"
+            $InstallPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+            $components = @(
+              "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+              "Microsoft.VisualStudio.Component.VC.v141.x86.x64"
+            )
+            [string]$workloadArgs = $components | ForEach-Object {" --add " + $_}
+            $Arguments = ('/c', "vs_installer.exe", 'modify', '--installPath', "`"$InstallPath`"",$workloadArgs, '--quiet', '--norestart')
+            $process = Start-Process -FilePath cmd.exe -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
+            Write-Host "Install exit code: $($process.ExitCode)"
+          } else {
+            Write-Host "v142 toolset already available"
+          }
+
+      # ── 4. Build Corona.Shell.sln ──────────────────────────────────
+      - name: Build Corona.Shell
+        shell: cmd
+        run: |
+          cd platform\windows
+          msbuild Corona.Shell.sln /p:Configuration=Release /p:Platform=Win32 /m /v:minimal /nologo
+        continue-on-error: false
+
+      # ── 5. Fallback: retry with v143 toolset if v142 fails ─────────
+      - name: Build Corona.Shell (v143 fallback)
+        if: failure()
+        shell: cmd
+        run: |
+          cd platform\windows
+          msbuild Corona.Shell.sln /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m /v:minimal /nologo
+
+      # ── 6. Collect build output ────────────────────────────────────
+      - name: Collect Shell artifacts
+        shell: powershell
+        run: |
+          $collectDir = "$env:GITHUB_WORKSPACE\shell-output"
+          New-Item -ItemType Directory -Path $collectDir -Force | Out-Null
+
+          # Find Corona.Shell.exe in the build output
+          $shellExe = Get-ChildItem "$env:GITHUB_WORKSPACE\platform\windows" -Recurse -Filter "Corona.Shell.exe" |
+            Where-Object { $_.DirectoryName -match "Release" } |
+            Select-Object -First 1
+
+          if (-not $shellExe) {
+            Write-Error "Corona.Shell.exe not found in build output!"
+            # Show what was built
+            Write-Host "::group::Build output tree"
+            Get-ChildItem "$env:GITHUB_WORKSPACE\platform\windows" -Recurse -Filter "*.exe" |
+              ForEach-Object { Write-Host "  $($_.FullName)" }
+            Get-ChildItem "$env:GITHUB_WORKSPACE\platform\windows" -Recurse -Filter "*.dll" |
+              ForEach-Object { Write-Host "  $($_.FullName)" }
+            Write-Host "::endgroup::"
+            exit 1
+          }
+
+          $shellDir = $shellExe.DirectoryName
+          Write-Host "Found Corona.Shell.exe at: $($shellExe.FullName)"
+
+          # Copy exe and all DLLs from the same directory
+          Copy-Item "$shellDir\Corona.Shell.exe" -Destination $collectDir
+          Get-ChildItem $shellDir -Filter "*.dll" | ForEach-Object {
+            Copy-Item $_.FullName -Destination $collectDir
+            Write-Host "  + $($_.Name)"
+          }
+          # Also copy any manifest files
+          Get-ChildItem $shellDir -Filter "*.manifest" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName -Destination $collectDir
+          }
+
+          # Also look for DLLs in sibling/parent output directories that Shell might need
+          $parentDir = Split-Path $shellDir
+          Get-ChildItem $parentDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.DirectoryName -match "Release" } |
+            ForEach-Object {
+              $destFile = Join-Path $collectDir $_.Name
+              if (-not (Test-Path $destFile)) {
+                Copy-Item $_.FullName -Destination $collectDir
+                Write-Host "  + $($_.Name) (from $($_.DirectoryName))"
+              }
+            }
+
+          Write-Host "`nCollected files:"
+          Get-ChildItem $collectDir | ForEach-Object {
+            Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB)) KB)"
+          }
+
+      # ── 7. Upload as workflow artifact ─────────────────────────────
+      - name: Upload Shell artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoronaShell-experimental-${{ inputs.build_label }}
+          path: shell-output/
+          if-no-files-found: error
+          retention-days: 90
+
+      # ── 8. Create/update release for cross-repo consumption ────────
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd shell-output
+          zip -r ../CoronaShell-experimental.zip .
+
+          # Delete existing release if present
+          gh release delete experimental-latest --yes 2>/dev/null || true
+          git push origin :refs/tags/experimental-latest 2>/dev/null || true
+
+          # Create new release
+          gh release create experimental-latest \
+            ../CoronaShell-experimental.zip \
+            --title "Experimental Shell (${{ inputs.build_label }})" \
+            --notes "Automated experimental build of Corona.Shell.exe with modified frame pacing.
+          Build label: ${{ inputs.build_label }}
+          Commit: ${{ github.sha }}
+          Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --prerelease
