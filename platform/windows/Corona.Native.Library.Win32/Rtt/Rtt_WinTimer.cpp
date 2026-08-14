@@ -7,7 +7,7 @@
 //
 //////////////////////////////////////////////////////////////////////////////
 //
-// MODIFIED: High-resolution frame pacing experiment
+// MODIFIED: Vsync-driven frame pacing experiment
 //
 // Summary of changes vs. stock Solar2D:
 //
@@ -29,6 +29,12 @@
 // 5. DIAGNOSTICS: Optional frame-pacing diagnostics (enabled via SOLAR2D_FRAME_DIAG=1
 //    environment variable) that record QPC timestamps and output statistics + CSV
 //    on shutdown for analysis.
+//
+// 6. VSYNC-DRIVEN PACING: When enabled (default when hi-res timer is active),
+//    skips the QPC deadline check entirely and lets SwapBuffers() with vsync=1
+//    pace frames. The 1ms SetTimer serves only as a re-trigger after SwapBuffers
+//    returns. A 4ms safety minimum prevents spinning if vsync fails.
+//    Override: SOLAR2D_VSYNC_PACING=0 falls back to QPC deadline pacing.
 //
 // The stock GetTickCount()/SetTimer(10ms) path is preserved and can be activated
 // by setting environment variable SOLAR2D_STOCK_TIMER=1.
@@ -257,6 +263,8 @@ WinTimer::WinTimer(MCallback& callback, HWND windowHandle)
 	::QueryPerformanceFrequency(&fQpcFrequency);
 	fIntervalQpc = 0.0;
 	fNextDeadlineQpc = 0.0;
+	fVsyncPacing = false;
+	fLastFrameQpc = 0;
 
 	// Default to high-res timer unless SOLAR2D_STOCK_TIMER=1
 	fUseHiResTimer = true;
@@ -271,6 +279,26 @@ WinTimer::WinTimer(MCallback& callback, HWND windowHandle)
 		else
 		{
 			::OutputDebugStringA("Solar2D: Using HIGH-RES timer (QPC + SetTimer 1ms + timeBeginPeriod)\n");
+		}
+	}
+
+	// Vsync-driven pacing: enabled by default when hi-res timer is active.
+	// SwapBuffers() with vsync=1 becomes the sole frame pacer; the QPC deadline
+	// check is skipped entirely. Override with SOLAR2D_VSYNC_PACING=0 to fall
+	// back to QPC deadline pacing.
+	if (fUseHiResTimer)
+	{
+		fVsyncPacing = true;  // default: on
+		char buf[16] = {};
+		DWORD len = ::GetEnvironmentVariableA("SOLAR2D_VSYNC_PACING", buf, sizeof(buf));
+		if (len > 0 && (buf[0] == '0' || buf[0] == 'n' || buf[0] == 'N'))
+		{
+			fVsyncPacing = false;
+			::OutputDebugStringA("Solar2D: Vsync pacing DISABLED (using QPC deadline pacing)\n");
+		}
+		else
+		{
+			::OutputDebugStringA("Solar2D: Vsync pacing ENABLED (SwapBuffers drives frame timing)\n");
 		}
 	}
 
@@ -301,6 +329,7 @@ WinTimer::WinTimer(MCallback& callback, HWND windowHandle)
 		{
 			fprintf(f, "Experimental CoronaLabs.Corona.Native.dll loaded.\n");
 			fprintf(f, "High-res timer: %s\n", fUseHiResTimer ? "YES" : "NO (stock mode)");
+			fprintf(f, "Vsync pacing: %s\n", fVsyncPacing ? "YES" : "NO");
 			fprintf(f, "Frame diagnostics: ENABLED\n");
 			fprintf(f, "QPC frequency: %lld Hz\n", (long long)fQpcFrequency.QuadPart);
 			fclose(f);
@@ -435,9 +464,50 @@ void WinTimer::Evaluate()
 		return;
 	}
 
-	if (fUseHiResTimer)
+	if (fVsyncPacing)
 	{
-		// --- High-resolution path ---
+		// --- Vsync-driven pacing path ---
+		//
+		// SwapBuffers() with vsync=1 blocks until the next vblank (~16.67ms at 60Hz),
+		// providing hardware-accurate frame timing with zero drift. We skip the QPC
+		// deadline check entirely and always invoke the callback.
+		//
+		// The 1ms SetTimer serves only as a re-trigger after SwapBuffers() returns.
+		//
+		// Safety: enforce a minimum 4ms interval via QPC to prevent spinning if
+		// vsync fails (driver ignores it, compositing off, etc). This caps us at
+		// ~250fps worst case instead of thousands.
+
+		LARGE_INTEGER now;
+		::QueryPerformanceCounter(&now);
+		int64_t nowQpc = now.QuadPart;
+
+		if (fLastFrameQpc != 0)
+		{
+			// 4ms minimum interval in QPC ticks
+			double minIntervalQpc = 0.004 * (double)fQpcFrequency.QuadPart;
+			double elapsed = (double)(nowQpc - fLastFrameQpc);
+			if (elapsed < minIntervalQpc)
+			{
+				return;  // Too soon — wait for next WM_TIMER
+			}
+		}
+
+		fLastFrameQpc = nowQpc;
+
+		// Record frame timestamp for diagnostics
+		if (fDiagnostics)
+		{
+			fDiagnostics->RecordFrame();
+		}
+
+		// Invoke the runtime's frame callback — SwapBuffers() inside will block
+		// until the next vblank, providing the actual frame pacing.
+		this->operator()();
+	}
+	else if (fUseHiResTimer)
+	{
+		// --- High-resolution QPC deadline path ---
 		LARGE_INTEGER now;
 		::QueryPerformanceCounter(&now);
 		int64_t nowQpc = now.QuadPart;

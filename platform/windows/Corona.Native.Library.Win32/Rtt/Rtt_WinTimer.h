@@ -7,10 +7,11 @@
 //
 //////////////////////////////////////////////////////////////////////////////
 //
-// MODIFIED: High-resolution frame pacing experiment
+// MODIFIED: Vsync-driven frame pacing experiment
 // Changes:
 //   - Added QPC-based timing fields for sub-millisecond frame scheduling
 //   - Added FrameDiagnostics for measuring actual frame intervals
+//   - Added vsync-pacing mode: skips QPC deadline, lets SwapBuffers() pace frames
 //   - Original GetTickCount()/SetTimer(10ms) path preserved as fallback
 //
 //////////////////////////////////////////////////////////////////////////////
@@ -102,6 +103,10 @@ class WinTimer : public PlatformTimer
 		double fIntervalQpc;            // Frame interval in QPC ticks (preserves 16.6667ms precision)
 		double fNextDeadlineQpc;        // Absolute deadline in QPC ticks (double avoids truncation drift)
 		bool fUseHiResTimer;            // true = QPC + timeBeginPeriod(1), false = stock GetTickCount path
+
+		// --- Vsync-driven frame pacing ---
+		bool fVsyncPacing;              // true = skip QPC deadline, let SwapBuffers() pace frames
+		int64_t fLastFrameQpc;          // QPC timestamp of last frame invocation (safety minimum interval)
 
 		// --- Frame diagnostics ---
 		FrameDiagnostics* fDiagnostics; // Heap-allocated to avoid bloating the class; may be null

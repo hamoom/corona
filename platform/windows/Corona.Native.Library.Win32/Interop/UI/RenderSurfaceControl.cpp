@@ -7,8 +7,9 @@
 //
 //////////////////////////////////////////////////////////////////////////////
 //
-// MODIFIED: Added optional explicit vsync configuration via wglSwapIntervalEXT.
-// Controlled by environment variable SOLAR2D_VSYNC (see CreateContext method).
+// MODIFIED: Vsync enabled by default via wglSwapIntervalEXT(1) for frame pacing.
+// SwapBuffers() blocks until vblank, providing hardware-accurate frame timing.
+// Override: SOLAR2D_VSYNC=0 disables vsync (see CreateContext method).
 //
 //////////////////////////////////////////////////////////////////////////////
 
@@ -268,39 +269,35 @@ void RenderSurfaceControl::CreateContext(const Params & params)
 		// Load OpenGL extensions.
 		glewInit();
 
-		// --- EXPERIMENTAL: Optional explicit vsync configuration ---
+		// --- Vsync configuration for frame pacing ---
 		//
-		// Stock Solar2D does NOT call wglSwapIntervalEXT(), leaving vsync behavior
-		// entirely to the GPU driver defaults and Windows DWM (Desktop Window Manager).
+		// Enable vsync by default so that SwapBuffers() blocks until the next
+		// vblank. This is the foundation of vsync-driven frame pacing: the GPU's
+		// display refresh becomes the sole timing source, eliminating the drift
+		// between software timers and the hardware refresh clock.
 		//
-		// On modern Windows (8+), DWM compositing means SwapBuffers() is implicitly
-		// synchronized to the display refresh regardless of the swap interval setting.
-		// However, explicitly setting the swap interval can still affect behavior:
-		//   - In fullscreen exclusive mode (if applicable), it controls actual vsync
-		//   - Some drivers respect it even under DWM composition
-		//   - wglSwapIntervalEXT(0) may reduce input latency at the cost of tearing
-		//
-		// Environment variable SOLAR2D_VSYNC controls the swap interval:
-		//   SOLAR2D_VSYNC=1  -> Enable vsync (sync to monitor refresh)
-		//   SOLAR2D_VSYNC=0  -> Disable vsync (may reduce latency, may cause tearing)
-		//   Not set           -> Leave at driver/DWM default (stock behavior)
+		// Override: SOLAR2D_VSYNC=0 disables vsync (for debugging/testing).
+		// Any other value of SOLAR2D_VSYNC sets that swap interval directly.
 		//
 		{
+			int vsyncValue = 1;  // Default: vsync ON
+
 			char vsyncBuf[16] = {};
 			DWORD vsyncLen = ::GetEnvironmentVariableA("SOLAR2D_VSYNC", vsyncBuf, sizeof(vsyncBuf));
 			if (vsyncLen > 0)
 			{
-				int vsyncValue = atoi(vsyncBuf);
-				if (WGLEW_EXT_swap_control)
-				{
-					wglSwapIntervalEXT(vsyncValue);
-					Rtt_LogException("Solar2D: Set wglSwapIntervalEXT(%d) [vsync %s]\r\n",
-						vsyncValue, vsyncValue ? "ON" : "OFF");
-				}
-				else
-				{
-					Rtt_LogException("Solar2D: WGL_EXT_swap_control not available, cannot set vsync\r\n");
-				}
+				vsyncValue = atoi(vsyncBuf);
+			}
+
+			if (WGLEW_EXT_swap_control)
+			{
+				wglSwapIntervalEXT(vsyncValue);
+				Rtt_LogException("Solar2D: Set wglSwapIntervalEXT(%d) [vsync %s]\r\n",
+					vsyncValue, vsyncValue ? "ON" : "OFF");
+			}
+			else
+			{
+				Rtt_LogException("Solar2D: WGL_EXT_swap_control not available, cannot set vsync\r\n");
 			}
 		}
 
