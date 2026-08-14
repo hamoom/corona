@@ -105,8 +105,8 @@ class WinTimer : public PlatformTimer
 		bool fUseHiResTimer;            // true = QPC + timeBeginPeriod(1), false = stock GetTickCount path
 
 		// --- Vsync-driven frame pacing ---
-		bool fVsyncPacing;              // true = skip QPC deadline, let SwapBuffers() pace frames
-		int64_t fLastFrameQpc;          // QPC timestamp of last frame invocation (safety minimum interval)
+		bool fVsyncPacing;              // true = hybrid deadline + vsync for frame pacing
+		double fVsyncDeadlineQpc;       // Absolute deadline set ~90% of frame interval (SwapBuffers handles the rest)
 
 		// --- Frame diagnostics ---
 		FrameDiagnostics* fDiagnostics; // Heap-allocated to avoid bloating the class; may be null

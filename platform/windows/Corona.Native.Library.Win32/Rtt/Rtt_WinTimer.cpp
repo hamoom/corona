@@ -30,11 +30,12 @@
 //    environment variable) that record QPC timestamps and output statistics + CSV
 //    on shutdown for analysis.
 //
-// 6. VSYNC-DRIVEN PACING: When enabled (default when hi-res timer is active),
-//    skips the QPC deadline check entirely and lets SwapBuffers() with vsync=1
-//    pace frames. The 1ms SetTimer serves only as a re-trigger after SwapBuffers
-//    returns. A 4ms safety minimum prevents spinning if vsync fails.
-//    Override: SOLAR2D_VSYNC_PACING=0 falls back to QPC deadline pacing.
+// 6. HYBRID VSYNC PACING: When enabled (default when hi-res timer is active),
+//    uses a shortened QPC deadline (~90% of frame interval, ~15ms at 60Hz) to
+//    gate Evaluate(), then lets SwapBuffers() with vsync=1 handle the final
+//    ~1.7ms with hardware precision. The absolute deadline prevents CPU spinning
+//    and maintains phase coherence; vsync provides drift-free vblank locking.
+//    Override: SOLAR2D_VSYNC_PACING=0 falls back to full QPC deadline pacing.
 //
 // The stock GetTickCount()/SetTimer(10ms) path is preserved and can be activated
 // by setting environment variable SOLAR2D_STOCK_TIMER=1.
@@ -264,7 +265,7 @@ WinTimer::WinTimer(MCallback& callback, HWND windowHandle)
 	fIntervalQpc = 0.0;
 	fNextDeadlineQpc = 0.0;
 	fVsyncPacing = false;
-	fLastFrameQpc = 0;
+	fVsyncDeadlineQpc = 0.0;
 
 	// Default to high-res timer unless SOLAR2D_STOCK_TIMER=1
 	fUseHiResTimer = true;
@@ -371,6 +372,13 @@ void WinTimer::Start()
 		::QueryPerformanceCounter(&now);
 		fNextDeadlineQpc = (double)now.QuadPart + fIntervalQpc;
 
+		// For vsync pacing, use a shorter deadline (~90% of frame interval).
+		// SwapBuffers() handles the remaining ~1.7ms with hardware precision.
+		if (fVsyncPacing)
+		{
+			fVsyncDeadlineQpc = (double)now.QuadPart + (fIntervalQpc * 0.9);
+		}
+
 		// Schedule a 1ms Windows timer for polling.
 		// With timeBeginPeriod(1), this fires every ~1-2ms, giving us <2ms latency
 		// to hit our QPC-computed deadline (vs. ~10-15ms with the stock 10ms timer).
@@ -466,34 +474,37 @@ void WinTimer::Evaluate()
 
 	if (fVsyncPacing)
 	{
-		// --- Vsync-driven pacing path ---
+		// --- Hybrid vsync pacing path ---
 		//
-		// SwapBuffers() with vsync=1 blocks until the next vblank (~16.67ms at 60Hz),
-		// providing hardware-accurate frame timing with zero drift. We skip the QPC
-		// deadline check entirely and always invoke the callback.
+		// Combines absolute QPC deadline with GPU vsync for best of both:
+		//   - QPC deadline (~90% of frame interval, ~15ms at 60Hz) gates Evaluate()
+		//     to prevent CPU spinning and maintain phase coherence over time.
+		//   - SwapBuffers() with vsync=1 handles the final ~1.7ms with hardware
+		//     precision, locking presentation to the exact vblank.
 		//
-		// The 1ms SetTimer serves only as a re-trigger after SwapBuffers() returns.
-		//
-		// Safety: enforce a minimum 4ms interval via QPC to prevent spinning if
-		// vsync fails (driver ignores it, compositing off, etc). This caps us at
-		// ~250fps worst case instead of thousands.
+		// The absolute deadline uses accumulated timing (deadline += interval)
+		// so scheduling jitter doesn't cause long-term drift. If we miss a
+		// deadline (e.g. GC spike), it advances past current time rather than
+		// trying to catch up with rapid successive frames.
 
 		LARGE_INTEGER now;
 		::QueryPerformanceCounter(&now);
-		int64_t nowQpc = now.QuadPart;
+		double nowQpc = (double)now.QuadPart;
 
-		if (fLastFrameQpc != 0)
+		// Not yet time — most WM_TIMER calls exit here, keeping CPU idle
+		if (nowQpc < fVsyncDeadlineQpc)
 		{
-			// 4ms minimum interval in QPC ticks
-			double minIntervalQpc = 0.004 * (double)fQpcFrequency.QuadPart;
-			double elapsed = (double)(nowQpc - fLastFrameQpc);
-			if (elapsed < minIntervalQpc)
-			{
-				return;  // Too soon — wait for next WM_TIMER
-			}
+			return;
 		}
 
-		fLastFrameQpc = nowQpc;
+		// Advance deadline past current time using absolute accumulation.
+		// Uses 90% of interval so we submit ~1.7ms before vblank;
+		// SwapBuffers() blocks for the remainder with hardware accuracy.
+		double shortInterval = fIntervalQpc * 0.9;
+		while (fVsyncDeadlineQpc <= nowQpc)
+		{
+			fVsyncDeadlineQpc += shortInterval;
+		}
 
 		// Record frame timestamp for diagnostics
 		if (fDiagnostics)
@@ -502,7 +513,7 @@ void WinTimer::Evaluate()
 		}
 
 		// Invoke the runtime's frame callback — SwapBuffers() inside will block
-		// until the next vblank, providing the actual frame pacing.
+		// until the next vblank, providing hardware-accurate final timing.
 		this->operator()();
 	}
 	else if (fUseHiResTimer)
