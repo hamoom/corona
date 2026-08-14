@@ -87,8 +87,8 @@ jobs:
           New-Item -ItemType Directory -Path $collectDir -Force | Out-Null
 
           # Find Corona.Shell.exe in the build output
+          # MSBuild outputs to platform\windows\Bin\Corona\ (not a "Release" subdirectory)
           $shellExe = Get-ChildItem "$env:GITHUB_WORKSPACE\platform\windows" -Recurse -Filter "Corona.Shell.exe" |
-            Where-Object { $_.DirectoryName -match "Release" } |
             Select-Object -First 1
 
           if (-not $shellExe) {
