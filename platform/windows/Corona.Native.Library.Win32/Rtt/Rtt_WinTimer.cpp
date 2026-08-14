@@ -66,11 +66,13 @@ struct FrameDiagnostics
 
 	int64_t timestamps[kMaxSamples];
 	size_t count;
+	size_t totalFramesDumped;
 	LARGE_INTEGER qpcFrequency;
 	bool enabled;
 
 	FrameDiagnostics()
 		: count(0)
+		, totalFramesDumped(0)
 		, enabled(false)
 	{
 		::QueryPerformanceFrequency(&qpcFrequency);
@@ -87,7 +89,15 @@ struct FrameDiagnostics
 
 	void RecordFrame()
 	{
-		if (!enabled || count >= kMaxSamples) return;
+		if (!enabled) return;
+
+		// When buffer is full, dump results and reset for next batch
+		if (count >= kMaxSamples)
+		{
+			DumpResults();
+			count = 0;
+			return;
+		}
 
 		LARGE_INTEGER now;
 		::QueryPerformanceCounter(&now);
@@ -157,24 +167,33 @@ struct FrameDiagnostics
 			basePath = cwd;
 		}
 
-		// Write raw intervals to CSV
+		// Write raw intervals to CSV (append mode so multiple batches accumulate)
 		{
 			std::string csvPath = basePath + "\\frame_intervals.csv";
+			bool fileExists = false;
+			{
+				FILE* check = nullptr;
+				fopen_s(&check, csvPath.c_str(), "r");
+				if (check) { fileExists = true; fclose(check); }
+			}
 			FILE* f = nullptr;
-			fopen_s(&f, csvPath.c_str(), "w");
+			fopen_s(&f, csvPath.c_str(), "a");
 			if (f)
 			{
-				fprintf(f, "frame,interval_ms\n");
+				if (!fileExists)
+				{
+					fprintf(f, "frame,interval_ms\n");
+				}
 				for (size_t i = 0; i < numIntervals; i++)
 				{
-					fprintf(f, "%zu,%.6f\n", i + 1, intervals[i]);
+					fprintf(f, "%zu,%.6f\n", totalFramesDumped + i + 1, intervals[i]);
 				}
 				fclose(f);
-				::OutputDebugStringA(("Solar2D Diag: Wrote frame intervals to " + csvPath + "\n").c_str());
 			}
+			totalFramesDumped += numIntervals;
 		}
 
-		// Write human-readable summary
+		// Write human-readable summary (overwrite with latest stats)
 		{
 			std::string summaryPath = basePath + "\\frame_pacing_summary.txt";
 			FILE* f = nullptr;
@@ -183,7 +202,8 @@ struct FrameDiagnostics
 			{
 				fprintf(f, "Solar2D Frame Pacing Diagnostics\n");
 				fprintf(f, "================================\n\n");
-				fprintf(f, "Frames recorded:  %zu\n", count);
+				fprintf(f, "Batch frames:     %zu\n", count);
+				fprintf(f, "Total frames:     %zu\n", totalFramesDumped);
 				fprintf(f, "Intervals:        %zu\n\n", numIntervals);
 				fprintf(f, "Expected interval (60 FPS): %.4f ms\n\n", expectedInterval);
 				fprintf(f, "Mean:    %.4f ms  (%.1f FPS)\n", mean, 1000.0 / mean);
@@ -200,7 +220,6 @@ struct FrameDiagnostics
 						(long long)qpcFrequency.QuadPart,
 						(double)qpcFrequency.QuadPart / 1e6);
 				fclose(f);
-				::OutputDebugStringA(("Solar2D Diag: Wrote summary to " + summaryPath + "\n").c_str());
 			}
 		}
 
