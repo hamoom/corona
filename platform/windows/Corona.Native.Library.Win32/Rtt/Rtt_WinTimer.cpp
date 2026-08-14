@@ -257,6 +257,36 @@ WinTimer::WinTimer(MCallback& callback, HWND windowHandle)
 
 	// Create diagnostics (records frame timestamps if SOLAR2D_FRAME_DIAG=1)
 	fDiagnostics = new FrameDiagnostics();
+
+	// Write a marker file at startup so we can confirm the experimental DLL is loaded.
+	// Also helps verify the diagnostics output path is writable.
+	if (fDiagnostics && fDiagnostics->enabled)
+	{
+		char pathBuf[MAX_PATH] = {};
+		::GetEnvironmentVariableA("SOLAR2D_DIAG_PATH", pathBuf, sizeof(pathBuf));
+		std::string markerPath;
+		if (pathBuf[0] != '\0')
+		{
+			markerPath = pathBuf;
+		}
+		else
+		{
+			char cwd[MAX_PATH] = {};
+			::GetCurrentDirectoryA(MAX_PATH, cwd);
+			markerPath = cwd;
+		}
+		markerPath += "\\experimental_dll_loaded.txt";
+		FILE* f = nullptr;
+		fopen_s(&f, markerPath.c_str(), "w");
+		if (f)
+		{
+			fprintf(f, "Experimental CoronaLabs.Corona.Native.dll loaded.\n");
+			fprintf(f, "High-res timer: %s\n", fUseHiResTimer ? "YES" : "NO (stock mode)");
+			fprintf(f, "Frame diagnostics: ENABLED\n");
+			fprintf(f, "QPC frequency: %lld Hz\n", (long long)fQpcFrequency.QuadPart);
+			fclose(f);
+		}
+	}
 }
 
 WinTimer::~WinTimer()
